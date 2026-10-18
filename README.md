@@ -1,16 +1,26 @@
 # Fourier Studio
 
-A browser-based Fourier drawing studio. Upload an SVG, PNG, or JPG, extract a contour, compute Fourier coefficients, and watch epicycles reconstruct the curve.
+A browser-based Fourier drawing studio. Upload a vector or raster image, extract a contour, calculate Fourier coefficients, and watch rotating epicycles reconstruct the curve.
 
 ## Features
 
-- Browser-only image processing; uploaded images are not sent to a server.
-- SVG path sampling and raster contour extraction.
-- FFT-based Fourier coefficient calculation.
-- Adjustable frequency count, animation speed, and visual overlays.
-- Export reconstructed curve as SVG and coefficients as JSON.
+- Browser-only processing; source files are not uploaded to a server.
+- SVG path sampling plus raster silhouette extraction.
+- Radix-2 FFT Fourier coefficient calculation.
+- Adjustable number of Fourier terms and animation speed.
+- Toggles for rotating circles, vectors, and reconstructed trace.
+- Export coefficients as JSON and reconstructed curve as SVG.
+- No Python backend, paid API key, or database required.
 
-## Getting started
+## Stack
+
+- Next.js App Router
+- React and TypeScript
+- Canvas 2D
+- Custom FFT implementation
+- Vercel deployment compatible
+
+## Run locally
 
 Requirements: Node.js 20.9+ and npm.
 
@@ -23,18 +33,24 @@ Open http://localhost:3000.
 
 ## How it works
 
-1. Raster images are thresholded and their boundary is traced with a browser-side contour follower. SVG files use a browser SVG path sampler.
-2. The contour is resampled to approximately uniform arc-length spacing.
-3. A radix-2 FFT computes complex Fourier coefficients. Coefficients are ordered by magnitude for the best approximation at a given term budget.
-4. Canvas draws the rotating vectors and circles while the final vector endpoint traces the reconstruction.
+1. The app extracts ordered 2D points from an SVG path or raster silhouette.
+2. The contour is resampled approximately uniformly by arc length.
+3. A radix-2 FFT computes normalized complex Fourier coefficients.
+4. The coefficients are ranked by magnitude for term selection.
+5. Canvas renders each rotating vector and circle, while the final vector endpoint traces the reconstruction.
 
-## Notes and limitations
+For a coefficient (c_k) at frequency (k), its radius is (|c_k|), its starting phase is (arg(c_k)), and its angle evolves as (2pi kt+arg(c_k)).
 
-- The first version traces one selected/primary contour. Images with multiple disconnected strokes work best when supplied as SVG paths or simplified to a single contour.
-- A raster image with low contrast or a busy background may need threshold adjustment.
-- The displayed normalized RMS error is a project-defined metric and may differ from error figures shown by other Fourier visualization tools.
-- There is no Python server, database, or external API key required.
+## Image extraction notes
 
-## Deploying
+SVG input is preferred for detailed line art because paths can be sampled through browser SVG geometry APIs. Raster processing currently thresholds the image and keeps the largest foreground connected component. Its boundary ordering is a centroid-angle approximation, which works best for compact, nearly convex silhouettes. It may not correctly trace intricate concave shapes, multi-stroke drawings, or photographs with busy backgrounds. These are good candidates for future contour-following and user-assisted path selection features.
 
-Import this repository into Vercel and use the default Next.js build settings. No environment variables are required.
+## Error metric
+
+The UI reports normalized RMS positional error between the resampled original contour and the Fourier reconstruction. This is the project's defined metric and is not necessarily the same as error percentages reported by other Fourier visualization tools.
+
+## Deploy
+
+Import the repository into Vercel and use the default Next.js settings. No environment variables are needed.
+
+The GitHub Actions workflow runs dependency installation, TypeScript checks and a production build for pushes and pull requests.
