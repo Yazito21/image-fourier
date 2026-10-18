@@ -2,7 +2,7 @@
 
 import { ChangeEvent, DragEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Activity, ArrowDownToLine, AudioWaveform, FileImage, FileJson, Github, LoaderCircle, Maximize2, Pause, Play, RefreshCw, RotateCcw, ScanLine, Settings2, Sparkles, Upload, Waves, X } from "lucide-react";
-import { calculateFourier, FourierTerm, normalizedRmsError, Point, reconstruct } from "@/lib/fourier";
+import { calculateFourier, FourierTerm, fourierEnergyError, Point, reconstruct } from "@/lib/fourier";
 import { extractRasterContour, extractSvgContour, makeDemoContour } from "@/lib/contours";
 
 type Settings = { terms: number; speed: number; circles: boolean; vectors: boolean; source: boolean; trail: boolean; threshold: number; invert: boolean };
@@ -29,7 +29,7 @@ export default function Home() {
   const [sourceImageUrl, setSourceImageUrl] = useState("");
   const visibleTerms = useMemo(() => terms.slice(0, settings.terms), [terms, settings.terms]);
   const reconstructed = useMemo(() => terms.length ? reconstruct(terms, settings.terms, 1024) : [], [terms, settings.terms]);
-  const errorValue = useMemo(() => sourcePoints.length && reconstructed.length ? normalizedRmsError(sourcePoints, reconstructed) : 0, [sourcePoints, reconstructed]);
+  const errorValue = useMemo(() => terms.length ? fourierEnergyError(terms, settings.terms) : 0, [terms, settings.terms]);
   const maxTerms = Math.max(8, terms.length);
 
   useEffect(() => { stateRef.current = { ...settings, playing }; }, [settings, playing]);
@@ -222,7 +222,7 @@ export default function Home() {
 
           <div className="visual-column">
             <div className="visualizer-card"><div className="visualizer-top"><div className="visualizer-title"><span className="live-dot"/> <span>LIVE PREVIEW</span><span className="preview-divider">/</span><span className="preview-file">{fileName}</span></div><div className="visualizer-tools"><span className="coordinate-label">ℂ / 2D</span><button className="icon-button canvas-tool" title="Reset animation" onClick={resetAnimation}><RotateCcw size={14}/></button><button className="icon-button canvas-tool" title="Refresh view" onClick={() => setPlaying(true)}><Maximize2 size={14}/></button></div></div><div className="canvas-wrap"><canvas ref={canvasRef} aria-label="Animated Fourier epicycles reconstructing the selected curve"/><div className="canvas-corner top-left">RE(z) <span>·</span> IM(z)</div><div className="canvas-corner bottom-left"><span className="legend-dot source-legend"/> SOURCE PATH <span className="legend-dot trace-legend"/> RECONSTRUCTION</div><div className="canvas-corner bottom-right">t = {elapsed}</div>{busy && <div className="canvas-overlay"><LoaderCircle size={25} className="spin"/><span>Calculating Fourier coefficients…</span></div>}</div><div className="visualizer-controls"><button className="play-button" onClick={() => setPlaying((v) => !v)}>{playing ? <Pause size={14} fill="currentColor"/> : <Play size={14} fill="currentColor"/>}{playing ? "Pause" : "Play"}</button><div className="playback-track"><span style={{width: (Number(elapsed.split(":")[1]) / 60 * 100) + "%"}}/></div><span className="playback-speed">{settings.speed.toFixed(2)}×</span><button className="icon-button" onClick={resetAnimation} title="Restart playback"><RotateCcw size={14}/></button></div></div>
-            <div className="metrics-grid"><Metric label="FOURIER TERMS" value={String(settings.terms).padStart(3,"0")} unit="coefficients" icon={<Waves size={15}/>} /><Metric label="RECONSTRUCTION ERROR" value={errorValue.toFixed(2)} unit="% · normalized RMS" icon={<Activity size={15}/>} /><Metric label="SAMPLING POINTS" value={String(sourcePoints.length).padStart(4,"0")} unit="contour points" icon={<ScanLine size={15}/>} /></div>
+            <div className="metrics-grid"><Metric label="FOURIER TERMS" value={String(settings.terms).padStart(3,"0")} unit="coefficients" icon={<Waves size={15}/>} /><Metric label="ESTIMATED TRUNCATION ERROR" value={errorValue.toFixed(2)} unit="% · normalized RMS" icon={<Activity size={15}/>} /><Metric label="SAMPLING POINTS" value={String(sourcePoints.length).padStart(4,"0")} unit="contour points" icon={<ScanLine size={15}/>} /></div>
             <div className="export-row"><div><div className="export-title">Take the curve with you</div><div className="export-subtitle">Export the math or a scalable vector trace.</div></div><div className="export-actions"><button className="export-button" onClick={exportCoefficients}><FileJson size={15}/> Coefficients <span>JSON</span></button><button className="export-button export-primary" onClick={exportSvg}><ArrowDownToLine size={15}/> Export trace <span>SVG</span></button></div></div>
           </div>
         </div>

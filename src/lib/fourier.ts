@@ -111,6 +111,16 @@ export function reconstruct(terms: FourierTerm[], count: number, pointCount = 10
   return points;
 }
 
+/** Percentage of Fourier signal energy discarded by keeping only the strongest coefficients.
+ * Parseval's theorem makes this a stable truncation-error estimate independent of contour ordering.
+ */
+export function fourierEnergyError(terms: FourierTerm[], count: number): number {
+  const total = terms.reduce((sum, term) => sum + term.amplitude * term.amplitude, 0);
+  if (total <= 0) return 0;
+  const kept = terms.slice(0, Math.max(0, count)).reduce((sum, term) => sum + term.amplitude * term.amplitude, 0);
+  return 100 * Math.sqrt(Math.max(0, total - kept) / total);
+}
+
 /** Normalized RMS pointwise reconstruction error, expressed as a percentage. */
 export function normalizedRmsError(original: Point[], reconstructed: Point[]): number {
   const n = Math.min(original.length, reconstructed.length);
@@ -119,7 +129,7 @@ export function normalizedRmsError(original: Point[], reconstructed: Point[]): n
   const my = original.slice(0, n).reduce((s, p) => s + p.y, 0) / n;
   let residual = 0, variance = 0;
   for (let i = 0; i < n; i++) {
-    residual += (original[i].x - reconstructed[i].x) ** 2 + (original[i].y - reconstructed[i].y) ** 2;
+    residual += (original[i].x - mx - reconstructed[i].x) ** 2 + (original[i].y - my - reconstructed[i].y) ** 2;
     variance += (original[i].x - mx) ** 2 + (original[i].y - my) ** 2;
   }
   return variance > 0 ? 100 * Math.sqrt(residual / variance) : 0;
