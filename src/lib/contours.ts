@@ -230,11 +230,56 @@ export async function extractRasterContour(file: File, options: RasterOptions): 
   }
   if (!componentContours.length) throw new Error("Could not trace a continuous outline. Try adjusting the threshold or using a cleaner image.");
 
+  // Multiple disconnected logo pieces must be joined in spatial order, not by
+  // component size. Start each contour at the point nearest the current endpoint,
+  // and choose the next component by its nearest boundary point to avoid long jumps.
+  const remaining = componentContours.map((points) => points.slice());
+  const ordered: Point[][] = [];
+  if (remaining.length) {
+    // Start at the leftmost point for a stable, predictable traversal.
+    let startContour = 0, startPoint = 0, minX = Infinity;
+    remaining.forEach((contour, ci) => contour.forEach((p, pi) => {
+      if (p.x < minX) { minX = p.x; startContour = ci; startPoint = pi; }
+    }));
+    const first = remaining.splice(startContour, 1)[0];
+    ordered.push(first.slice(startPoint).concat(first.slice(0, startPoint)));
+
+    while (remaining.length) {
+      const previous = ordered[ordered.length - 1];
+      const endPoint = previous[previous.length - 1];
+      let bestContour = 0, bestPoint = 0, bestDistance = Infinity;
+      for (let ci = 0; ci < remaining.length; ci++) {
+        for (let pi = 0; pi < remaining[ci].length; pi++) {
+          const p = remaining[ci][pi];
+          const distance = (p.x - endPoint.x) ** 2 + (p.y - endPoint.y) ** 2;
+          if (distance < bestDistance) {
+            bestDistance = distance;
+            bestContour = ci;
+            bestPoint = pi;
+          }
+        }
+      }
+      const next = remaining.splice(bestContour, 1)[0];
+      const forward = next.slice(bestPoint).concat(next.slice(0, bestPoint));
+      const reverse = [next[bestPoint], ...next.slice(0, bestPoint).reverse(), ...next.slice(bestPoint + 1).reverse()];
+      const distanceTo = (p: Point, q: Point) => Math.hypot(p.x - q.x, p.y - q.y);
+      const currentEnd = ordered[ordered.length - 1][ordered[ordered.length - 1].length - 1];
+      const forwardNext = forward[1] ?? forward[0];
+      const reverseNext = reverse[1] ?? reverse[0];
+      ordered.push(distanceTo(currentEnd, forwardNext) <= distanceTo(currentEnd, reverseNext) ? forward : reverse);
+    }
+  }
+
+  // Use one shared scale for x and y. Dividing by width and height independently
+  // distorts wide logos and can make the reconstructed wordmark look squashed.
+  const unit = Math.max(width, height);
   const result: Point[] = [];
-  for (const contour of componentContours) {
-    // Avoid repeated identical points and normalize to the image dimensions.
+  for (const contour of ordered) {
     for (const p of contour) {
-      const normalized = { x: p.x / width, y: p.y / height };
+      const normalized = {
+        x: 0.5 + (p.x - width / 2) / unit,
+        y: 0.5 + (p.y - height / 2) / unit,
+      };
       const previous = result[result.length - 1];
       if (!previous || Math.hypot(previous.x - normalized.x, previous.y - normalized.y) > 1e-5) result.push(normalized);
     }
