@@ -98,7 +98,7 @@ export default function Home() {
       ctx.clearRect(0, 0, width, height);
       const centreX = width / 2, centreY = height / 2;
       const sumAmplitude = visibleTerms.reduce((sum, term) => sum + term.amplitude, 0) || 1;
-      const scale = Math.min((Math.min(width, height) * 0.42) / sumAmplitude, 1.8);
+      const scale = (Math.min(width, height) * 0.42) / sumAmplitude;
       ctx.save();
       ctx.strokeStyle = "rgba(255,255,255,.035)";
       ctx.lineWidth = 1;

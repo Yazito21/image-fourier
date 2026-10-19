@@ -79,18 +79,26 @@ export async function extractRasterContour(file: File, options: RasterOptions): 
   canvas.height = height;
   const context = canvas.getContext("2d", { willReadFrequently: true });
   if (!context) throw new Error("This browser does not support the required canvas operations.");
-  context.fillStyle = "#fff";
-  context.fillRect(0, 0, width, height);
+  // Preserve alpha so transparent logos can be segmented by their visible pixels.
+  // Opaque photos/illustrations fall back to luminance thresholding below.
   context.drawImage(image, 0, 0, width, height);
   let pixels: ImageData;
   try { pixels = context.getImageData(0, 0, width, height); }
   catch { throw new Error("The image could not be read by the browser."); }
 
   const binary = new Uint8Array(width * height);
+  let transparentPixels = 0;
+  for (let i = 0; i < binary.length; i++) {
+    if (pixels.data[i * 4 + 3] < 250) transparentPixels++;
+  }
+  const hasTransparency = transparentPixels > binary.length * 0.001;
   let foreground = 0;
   for (let i = 0; i < binary.length; i++) {
-    const grey = pixels.data[i * 4] * 0.299 + pixels.data[i * 4 + 1] * 0.587 + pixels.data[i * 4 + 2] * 0.114;
-    const selected = options.invert ? grey >= options.threshold : grey < options.threshold;
+    const offset = i * 4;
+    const grey = pixels.data[offset] * 0.299 + pixels.data[offset + 1] * 0.587 + pixels.data[offset + 2] * 0.114;
+    const selected = hasTransparency
+      ? pixels.data[offset + 3] > 20
+      : (options.invert ? grey >= options.threshold : grey < options.threshold);
     binary[i] = selected ? 1 : 0;
     if (selected) foreground++;
   }
@@ -98,10 +106,45 @@ export async function extractRasterContour(file: File, options: RasterOptions): 
     throw new Error("The threshold did not isolate a useful shape. Adjust the threshold or invert the foreground/background setting.");
   }
 
-  // Find the largest 8-connected component using an iterative flood fill.
+  // For opaque line drawings, flood-fill the background from the image edges.
+  // Any background pixels unreachable from the edges are enclosed by the drawing;
+  // filling them turns outlines such as leaves into a solid silhouette.
+  if (!hasTransparency) {
+    const exterior = new Uint8Array(binary.length);
+    const flood = new Int32Array(binary.length);
+    let head = 0, tail = 0;
+    const enqueueBackground = (index: number) => {
+      if (!binary[index] && !exterior[index]) {
+        exterior[index] = 1;
+        flood[tail++] = index;
+      }
+    };
+    for (let x = 0; x < width; x++) {
+      enqueueBackground(x);
+      enqueueBackground((height - 1) * width + x);
+    }
+    for (let y = 0; y < height; y++) {
+      enqueueBackground(y * width);
+      enqueueBackground(y * width + width - 1);
+    }
+    while (head < tail) {
+      const index = flood[head++];
+      const x = index % width, y = Math.floor(index / width);
+      if (x > 0) enqueueBackground(index - 1);
+      if (x + 1 < width) enqueueBackground(index + 1);
+      if (y > 0) enqueueBackground(index - width);
+      if (y + 1 < height) enqueueBackground(index + width);
+    }
+    for (let i = 0; i < binary.length; i++) {
+      if (!binary[i] && !exterior[i]) binary[i] = 1;
+    }
+  }
+
+  // Find connected foreground components. Opaque drawings typically become one
+  // filled silhouette above; transparent logos may legitimately have many pieces.
   const seen = new Uint8Array(binary.length);
   const queue = new Int32Array(binary.length);
-  let best: number[] = [];
+  const components: number[][] = [];
   for (let i = 0; i < binary.length; i++) {
     if (!binary[i] || seen[i]) continue;
     let head = 0, tail = 0;
@@ -120,26 +163,83 @@ export async function extractRasterContour(file: File, options: RasterOptions): 
         if (binary[next] && !seen[next]) { seen[next] = 1; queue[tail++] = next; }
       }
     }
-    if (component.length > best.length) best = component;
+    if (component.length >= 10) components.push(component);
   }
-  if (best.length < 10) throw new Error("No sufficiently large shape was found. Try a darker outline or another threshold.");
-  const mask = new Uint8Array(binary.length);
-  for (const index of best) mask[index] = 1;
-  const boundary: Point[] = [];
-  for (const index of best) {
-    const x = index % width, y = Math.floor(index / width);
-    if (x === 0 || y === 0 || x === width - 1 || y === height - 1 ||
-        !mask[index - 1] || !mask[index + 1] || !mask[index - width] || !mask[index + width]) {
-      boundary.push({ x, y });
+  if (!components.length) throw new Error("No sufficiently large shape was found. Try a darker outline or another threshold.");
+
+  // Keep the primary silhouette for opaque drawings. For transparent artwork,
+  // retain the other pieces and join their ordered outlines by nearest endpoints.
+  const details = components.map((pixels) => {
+    let sumX = 0, sumY = 0;
+    for (const index of pixels) { sumX += index % width; sumY += Math.floor(index / width); }
+    return { pixels, cx: sumX / pixels.length, cy: sumY / pixels.length };
+  }).sort((a, b) => b.pixels.length - a.pixels.length);
+  const selected = hasTransparency ? details : details.slice(0, 1);
+  const componentContours: Point[][] = [];
+
+  // Moore-neighbour tracing follows adjacent boundary pixels in their actual
+  // perimeter order. Sorting boundary pixels by polar angle scrambles concave shapes.
+  const directions = [
+    { x: 0, y: -1 }, { x: 1, y: -1 }, { x: 1, y: 0 }, { x: 1, y: 1 },
+    { x: 0, y: 1 }, { x: -1, y: 1 }, { x: -1, y: 0 }, { x: -1, y: -1 },
+  ];
+  for (const component of selected) {
+    const mask = new Uint8Array(binary.length);
+    for (const index of component.pixels) mask[index] = 1;
+    let startIndex = component.pixels[0];
+    for (const index of component.pixels) {
+      const x = index % width, y = Math.floor(index / width);
+      const sx = startIndex % width, sy = Math.floor(startIndex / width);
+      if (y < sy || (y === sy && x < sx)) startIndex = index;
+    }
+    let current = startIndex;
+    let backX = current % width - 1;
+    let backY = Math.floor(current / width);
+    let firstNext = -1;
+    const contour: Point[] = [];
+    const maxSteps = Math.max(100, component.pixels.length * 8);
+    for (let step = 0; step < maxSteps; step++) {
+      const cx = current % width, cy = Math.floor(current / width);
+      contour.push({ x: cx, y: cy });
+      let backDirection = 6;
+      const dxBack = backX - cx, dyBack = backY - cy;
+      for (let d = 0; d < 8; d++) {
+        if (directions[d].x === dxBack && directions[d].y === dyBack) { backDirection = d; break; }
+      }
+      let next = -1, preceding = backDirection;
+      for (let offset = 1; offset <= 8; offset++) {
+        const d = (backDirection + offset) % 8;
+        const nx = cx + directions[d].x, ny = cy + directions[d].y;
+        if (nx < 0 || ny < 0 || nx >= width || ny >= height) continue;
+        const candidate = ny * width + nx;
+        if (mask[candidate]) {
+          next = candidate;
+          preceding = (d + 7) % 8;
+          break;
+        }
+      }
+      if (next < 0) break;
+      if (firstNext < 0) firstNext = next;
+      else if (current === startIndex && next === firstNext) { contour.pop(); break; }
+      backX = cx + directions[preceding].x;
+      backY = cy + directions[preceding].y;
+      current = next;
+      if (current === startIndex && firstNext >= 0) break;
+    }
+    if (contour.length >= 3) componentContours.push(contour);
+  }
+  if (!componentContours.length) throw new Error("Could not trace a continuous outline. Try adjusting the threshold or using a cleaner image.");
+
+  const result: Point[] = [];
+  for (const contour of componentContours) {
+    // Avoid repeated identical points and normalize to the image dimensions.
+    for (const p of contour) {
+      const normalized = { x: p.x / width, y: p.y / height };
+      const previous = result[result.length - 1];
+      if (!previous || Math.hypot(previous.x - normalized.x, previous.y - normalized.y) > 1e-5) result.push(normalized);
     }
   }
-  if (boundary.length < 3) throw new Error("Could not find a closed boundary for this image.");
-  // Sort by polar angle around the centroid. This is a fast approximation suitable for compact,
-  // near-convex silhouettes; use an SVG path for highly concave shapes.
-  const cx = boundary.reduce((sum, p) => sum + p.x, 0) / boundary.length;
-  const cy = boundary.reduce((sum, p) => sum + p.y, 0) / boundary.length;
-  boundary.sort((a, b) => Math.atan2(a.y - cy, a.x - cx) - Math.atan2(b.y - cy, b.x - cx));
-  return boundary.map((p) => ({ x: p.x / width, y: p.y / height }));
+  return result;
 }
 
 export function makeDemoContour(count = 700): Point[] {
