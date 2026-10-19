@@ -106,8 +106,42 @@ export async function extractRasterContour(file: File, options: RasterOptions): 
     throw new Error("The threshold did not isolate a useful shape. Adjust the threshold or invert the foreground/background setting.");
   }
 
-  // Find all 8-connected components. Transparent logos often contain separate
-  // letters, dots, and icon pieces, so keeping only the largest loses most of the image.
+  // For opaque line drawings, flood-fill the background from the image edges.
+  // Any background pixels unreachable from the edges are enclosed by the drawing;
+  // filling them turns outlines such as leaves into a solid silhouette.
+  if (!hasTransparency) {
+    const exterior = new Uint8Array(binary.length);
+    const flood = new Int32Array(binary.length);
+    let head = 0, tail = 0;
+    const enqueueBackground = (index: number) => {
+      if (!binary[index] && !exterior[index]) {
+        exterior[index] = 1;
+        flood[tail++] = index;
+      }
+    };
+    for (let x = 0; x < width; x++) {
+      enqueueBackground(x);
+      enqueueBackground((height - 1) * width + x);
+    }
+    for (let y = 0; y < height; y++) {
+      enqueueBackground(y * width);
+      enqueueBackground(y * width + width - 1);
+    }
+    while (head < tail) {
+      const index = flood[head++];
+      const x = index % width, y = Math.floor(index / width);
+      if (x > 0) enqueueBackground(index - 1);
+      if (x + 1 < width) enqueueBackground(index + 1);
+      if (y > 0) enqueueBackground(index - width);
+      if (y + 1 < height) enqueueBackground(index + width);
+    }
+    for (let i = 0; i < binary.length; i++) {
+      if (!binary[i] && !exterior[i]) binary[i] = 1;
+    }
+  }
+
+  // Find connected foreground components. Opaque drawings typically become one
+  // filled silhouette above; transparent logos may legitimately have many pieces.
   const seen = new Uint8Array(binary.length);
   const queue = new Int32Array(binary.length);
   const components: number[][] = [];
@@ -133,35 +167,78 @@ export async function extractRasterContour(file: File, options: RasterOptions): 
   }
   if (!components.length) throw new Error("No sufficiently large shape was found. Try a darker outline or another threshold.");
 
-  // Process larger components first, but order them left-to-right for more natural
-  // connecting strokes between separate parts of a wordmark.
+  // Keep the primary silhouette for opaque drawings. For transparent artwork,
+  // retain the other pieces and join their ordered outlines by nearest endpoints.
   const details = components.map((pixels) => {
     let sumX = 0, sumY = 0;
     for (const index of pixels) { sumX += index % width; sumY += Math.floor(index / width); }
     return { pixels, cx: sumX / pixels.length, cy: sumY / pixels.length };
-  }).sort((a, b) => a.cx - b.cx || b.pixels.length - a.pixels.length);
+  }).sort((a, b) => b.pixels.length - a.pixels.length);
+  const selected = hasTransparency ? details : details.slice(0, 1);
+  const componentContours: Point[][] = [];
 
-  const mask = new Uint8Array(binary.length);
-  const result: Point[] = [];
-  for (const component of details) {
-    mask.fill(0);
+  // Moore-neighbour tracing follows adjacent boundary pixels in their actual
+  // perimeter order. Sorting boundary pixels by polar angle scrambles concave shapes.
+  const directions = [
+    { x: 0, y: -1 }, { x: 1, y: -1 }, { x: 1, y: 0 }, { x: 1, y: 1 },
+    { x: 0, y: 1 }, { x: -1, y: 1 }, { x: -1, y: 0 }, { x: -1, y: -1 },
+  ];
+  for (const component of selected) {
+    const mask = new Uint8Array(binary.length);
     for (const index of component.pixels) mask[index] = 1;
-    const boundary: Point[] = [];
+    let startIndex = component.pixels[0];
     for (const index of component.pixels) {
       const x = index % width, y = Math.floor(index / width);
-      if (x === 0 || y === 0 || x === width - 1 || y === height - 1 ||
-          !mask[index - 1] || !mask[index + 1] || !mask[index - width] || !mask[index + width]) {
-        boundary.push({ x, y });
-      }
+      const sx = startIndex % width, sy = Math.floor(startIndex / width);
+      if (y < sy || (y === sy && x < sx)) startIndex = index;
     }
-    if (boundary.length < 3) continue;
-    const cx = boundary.reduce((sum, p) => sum + p.x, 0) / boundary.length;
-    const cy = boundary.reduce((sum, p) => sum + p.y, 0) / boundary.length;
-    boundary.sort((a, b) => Math.atan2(a.y - cy, a.x - cx) - Math.atan2(b.y - cy, b.x - cx));
-    result.push(...boundary.map((p) => ({ x: p.x / width, y: p.y / height })));
+    let current = startIndex;
+    let backX = current % width - 1;
+    let backY = Math.floor(current / width);
+    let firstNext = -1;
+    const contour: Point[] = [];
+    const maxSteps = Math.max(100, component.pixels.length * 8);
+    for (let step = 0; step < maxSteps; step++) {
+      const cx = current % width, cy = Math.floor(current / width);
+      contour.push({ x: cx, y: cy });
+      let backDirection = 6;
+      const dxBack = backX - cx, dyBack = backY - cy;
+      for (let d = 0; d < 8; d++) {
+        if (directions[d].x === dxBack && directions[d].y === dyBack) { backDirection = d; break; }
+      }
+      let next = -1, preceding = backDirection;
+      for (let offset = 1; offset <= 8; offset++) {
+        const d = (backDirection + offset) % 8;
+        const nx = cx + directions[d].x, ny = cy + directions[d].y;
+        if (nx < 0 || ny < 0 || nx >= width || ny >= height) continue;
+        const candidate = ny * width + nx;
+        if (mask[candidate]) {
+          next = candidate;
+          preceding = (d + 7) % 8;
+          break;
+        }
+      }
+      if (next < 0) break;
+      if (firstNext < 0) firstNext = next;
+      else if (current === startIndex && next === firstNext) { contour.pop(); break; }
+      backX = cx + directions[preceding].x;
+      backY = cy + directions[preceding].y;
+      current = next;
+      if (current === startIndex && firstNext >= 0) break;
+    }
+    if (contour.length >= 3) componentContours.push(contour);
   }
-  if (result.length < 3) throw new Error("Could not find a closed boundary for this image.");
-  // Component outlines are joined into one continuous contour for the Fourier series.
+  if (!componentContours.length) throw new Error("Could not trace a continuous outline. Try adjusting the threshold or using a cleaner image.");
+
+  const result: Point[] = [];
+  for (const contour of componentContours) {
+    // Avoid repeated identical points and normalize to the image dimensions.
+    for (const p of contour) {
+      const normalized = { x: p.x / width, y: p.y / height };
+      const previous = result[result.length - 1];
+      if (!previous || Math.hypot(previous.x - normalized.x, previous.y - normalized.y) > 1e-5) result.push(normalized);
+    }
+  }
   return result;
 }
 
