@@ -79,18 +79,26 @@ export async function extractRasterContour(file: File, options: RasterOptions): 
   canvas.height = height;
   const context = canvas.getContext("2d", { willReadFrequently: true });
   if (!context) throw new Error("This browser does not support the required canvas operations.");
-  context.fillStyle = "#fff";
-  context.fillRect(0, 0, width, height);
+  // Preserve alpha so transparent logos can be segmented by their visible pixels.
+  // Opaque photos/illustrations fall back to luminance thresholding below.
   context.drawImage(image, 0, 0, width, height);
   let pixels: ImageData;
   try { pixels = context.getImageData(0, 0, width, height); }
   catch { throw new Error("The image could not be read by the browser."); }
 
   const binary = new Uint8Array(width * height);
+  let transparentPixels = 0;
+  for (let i = 0; i < binary.length; i++) {
+    if (pixels.data[i * 4 + 3] < 250) transparentPixels++;
+  }
+  const hasTransparency = transparentPixels > binary.length * 0.001;
   let foreground = 0;
   for (let i = 0; i < binary.length; i++) {
-    const grey = pixels.data[i * 4] * 0.299 + pixels.data[i * 4 + 1] * 0.587 + pixels.data[i * 4 + 2] * 0.114;
-    const selected = options.invert ? grey >= options.threshold : grey < options.threshold;
+    const offset = i * 4;
+    const grey = pixels.data[offset] * 0.299 + pixels.data[offset + 1] * 0.587 + pixels.data[offset + 2] * 0.114;
+    const selected = hasTransparency
+      ? pixels.data[offset + 3] > 20
+      : (options.invert ? grey >= options.threshold : grey < options.threshold);
     binary[i] = selected ? 1 : 0;
     if (selected) foreground++;
   }
@@ -98,10 +106,11 @@ export async function extractRasterContour(file: File, options: RasterOptions): 
     throw new Error("The threshold did not isolate a useful shape. Adjust the threshold or invert the foreground/background setting.");
   }
 
-  // Find the largest 8-connected component using an iterative flood fill.
+  // Find all 8-connected components. Transparent logos often contain separate
+  // letters, dots, and icon pieces, so keeping only the largest loses most of the image.
   const seen = new Uint8Array(binary.length);
   const queue = new Int32Array(binary.length);
-  let best: number[] = [];
+  const components: number[][] = [];
   for (let i = 0; i < binary.length; i++) {
     if (!binary[i] || seen[i]) continue;
     let head = 0, tail = 0;
@@ -120,26 +129,40 @@ export async function extractRasterContour(file: File, options: RasterOptions): 
         if (binary[next] && !seen[next]) { seen[next] = 1; queue[tail++] = next; }
       }
     }
-    if (component.length > best.length) best = component;
+    if (component.length >= 10) components.push(component);
   }
-  if (best.length < 10) throw new Error("No sufficiently large shape was found. Try a darker outline or another threshold.");
+  if (!components.length) throw new Error("No sufficiently large shape was found. Try a darker outline or another threshold.");
+
+  // Process larger components first, but order them left-to-right for more natural
+  // connecting strokes between separate parts of a wordmark.
+  const details = components.map((pixels) => {
+    let sumX = 0, sumY = 0;
+    for (const index of pixels) { sumX += index % width; sumY += Math.floor(index / width); }
+    return { pixels, cx: sumX / pixels.length, cy: sumY / pixels.length };
+  }).sort((a, b) => a.cx - b.cx || b.pixels.length - a.pixels.length);
+
   const mask = new Uint8Array(binary.length);
-  for (const index of best) mask[index] = 1;
-  const boundary: Point[] = [];
-  for (const index of best) {
-    const x = index % width, y = Math.floor(index / width);
-    if (x === 0 || y === 0 || x === width - 1 || y === height - 1 ||
-        !mask[index - 1] || !mask[index + 1] || !mask[index - width] || !mask[index + width]) {
-      boundary.push({ x, y });
+  const result: Point[] = [];
+  for (const component of details) {
+    mask.fill(0);
+    for (const index of component.pixels) mask[index] = 1;
+    const boundary: Point[] = [];
+    for (const index of component.pixels) {
+      const x = index % width, y = Math.floor(index / width);
+      if (x === 0 || y === 0 || x === width - 1 || y === height - 1 ||
+          !mask[index - 1] || !mask[index + 1] || !mask[index - width] || !mask[index + width]) {
+        boundary.push({ x, y });
+      }
     }
+    if (boundary.length < 3) continue;
+    const cx = boundary.reduce((sum, p) => sum + p.x, 0) / boundary.length;
+    const cy = boundary.reduce((sum, p) => sum + p.y, 0) / boundary.length;
+    boundary.sort((a, b) => Math.atan2(a.y - cy, a.x - cx) - Math.atan2(b.y - cy, b.x - cx));
+    result.push(...boundary.map((p) => ({ x: p.x / width, y: p.y / height })));
   }
-  if (boundary.length < 3) throw new Error("Could not find a closed boundary for this image.");
-  // Sort by polar angle around the centroid. This is a fast approximation suitable for compact,
-  // near-convex silhouettes; use an SVG path for highly concave shapes.
-  const cx = boundary.reduce((sum, p) => sum + p.x, 0) / boundary.length;
-  const cy = boundary.reduce((sum, p) => sum + p.y, 0) / boundary.length;
-  boundary.sort((a, b) => Math.atan2(a.y - cy, a.x - cx) - Math.atan2(b.y - cy, b.x - cx));
-  return boundary.map((p) => ({ x: p.x / width, y: p.y / height }));
+  if (result.length < 3) throw new Error("Could not find a closed boundary for this image.");
+  // Component outlines are joined into one continuous contour for the Fourier series.
+  return result;
 }
 
 export function makeDemoContour(count = 700): Point[] {
