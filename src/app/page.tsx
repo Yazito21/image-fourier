@@ -81,6 +81,14 @@ export default function Home() {
     if (!ctx) return;
     let width = 1, height = 1, dpr = 1, last = performance.now(), t = 0, elapsedSecond = -1;
     const trail: Point[] = [];
+    const sourceCenterX = sourcePoints.length ? sourcePoints.reduce((sum, p) => sum + p.x, 0) / sourcePoints.length : 0.5;
+    const sourceCenterY = sourcePoints.length ? sourcePoints.reduce((sum, p) => sum + p.y, 0) / sourcePoints.length : 0.5;
+    const sourceMinX = sourcePoints.length ? Math.min(...sourcePoints.map((p) => p.x)) : 0;
+    const sourceMaxX = sourcePoints.length ? Math.max(...sourcePoints.map((p) => p.x)) : 1;
+    const sourceMinY = sourcePoints.length ? Math.min(...sourcePoints.map((p) => p.y)) : 0;
+    const sourceMaxY = sourcePoints.length ? Math.max(...sourcePoints.map((p) => p.y)) : 1;
+    const sourceWidth = Math.max(sourceMaxX - sourceMinX, 1e-6);
+    const sourceHeight = Math.max(sourceMaxY - sourceMinY, 1e-6);
     const resize = () => {
       const rect = canvas.getBoundingClientRect();
       dpr = Math.min(window.devicePixelRatio || 1, 2);
@@ -97,8 +105,9 @@ export default function Home() {
       if (state.playing) t = (t + dt * 0.000055 * state.speed) % 1;
       ctx.clearRect(0, 0, width, height);
       const centreX = width / 2, centreY = height / 2;
-      const sumAmplitude = visibleTerms.reduce((sum, term) => sum + term.amplitude, 0) || 1;
-      const scale = (Math.min(width, height) * 0.42) / sumAmplitude;
+      // Fit to the actual contour bounds, not the sum of every circle radius.
+      // The latter is only an upper bound and can make the finished shape tiny.
+      const scale = Math.min((width * 0.82) / sourceWidth, (height * 0.82) / sourceHeight);
       ctx.save();
       ctx.strokeStyle = "rgba(255,255,255,.035)";
       ctx.lineWidth = 1;
@@ -139,8 +148,8 @@ export default function Home() {
       if (state.source && sourcePoints.length > 2) {
         ctx.beginPath();
         sourcePoints.forEach((p, i) => {
-          const sx = centreX + (p.x - 0.5) * Math.min(width, height) * 0.8;
-          const sy = centreY + (p.y - 0.5) * Math.min(width, height) * 0.8;
+          const sx = centreX + (p.x - sourceCenterX) * scale;
+          const sy = centreY + (p.y - sourceCenterY) * scale;
           if (!i) ctx.moveTo(sx, sy); else ctx.lineTo(sx, sy);
         });
         ctx.closePath(); ctx.strokeStyle = "rgba(111,190,174,.40)"; ctx.lineWidth = 1; ctx.stroke();

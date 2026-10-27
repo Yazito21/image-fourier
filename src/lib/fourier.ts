@@ -84,7 +84,7 @@ export function calculateFourier(points: Point[], sampleCount = 1024): FourierTe
   const terms: FourierTerm[] = transformed.map((c, index) => {
     const frequency = index <= size / 2 ? index : index - size;
     const re = c.re / size;
-    const im = -c.im / size;
+    const im = c.im / size;
     return { frequency, re, im, amplitude: Math.hypot(re, im), phase: Math.atan2(im, re) };
   });
   return terms.sort((a, b) => b.amplitude - a.amplitude);
